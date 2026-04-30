@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from typing import Any, Literal, TypeVar
 
 from pydantic import ValidationError
@@ -9,6 +10,7 @@ from .exceptions import StructuredOutputValidationError
 from .providers import anthropic as anthropic_provider
 from .providers import openai as openai_provider
 from .renderable import MarkdownRenderable
+from .schema_utils import pydantic_to_json_schema
 from .telemetry import llm_span
 
 T = TypeVar("T", bound=MarkdownRenderable)
@@ -17,6 +19,24 @@ _RESERVED_PROVIDER_KEYS = frozenset({
     "tools", "tool_choice", "response_format",
     "messages", "model", "max_tokens", "system",
 })
+
+_MAX_RETRIES = 1
+
+
+def _build_retry_prompt(
+    original_prompt: str,
+    last_attempt_errors: list[dict[str, Any]],
+    schema_json: dict[str, Any],
+) -> str:
+    return (
+        f"{original_prompt}\n\n"
+        f"---\n"
+        f"Your previous response did not match the required schema. Errors:\n"
+        f"{json.dumps(last_attempt_errors, indent=2, default=str)}\n\n"
+        f"Required schema:\n"
+        f"{json.dumps(schema_json, indent=2)}\n\n"
+        f"Please respond again, conforming exactly to the schema."
+    )
 
 
 def call_structured(
@@ -32,15 +52,17 @@ def call_structured(
 ) -> T:
     """Call an LLM and return a validated instance of `model_class`.
 
-    PR-A scope: no retry — validation failures raise immediately.
-    Retry semantics ship in PR-B (T8) per tasks.md.
+    On parse/validation failure, retries exactly once with a corrective prompt
+    (REQ-SLO-004). Provider errors (rate limit, 5xx, timeout) are NOT retried —
+    they bubble up as StructuredOutputProviderError so callers can apply their
+    own backoff or breaker logic (see design §6.1).
 
     Raises:
         ValueError                          — unknown provider, or reserved provider_kwargs key
         TypeError                           — model_class doesn't extend MarkdownRenderable, or
                                               missing to_markdown override
-        StructuredOutputValidationError     — schema validation failed, OR provider returned
-                                              unparseable output (no tool_use block, non-JSON)
+        StructuredOutputValidationError     — validation/parse failure after the retry attempt;
+                                              `attempts` list contains both attempts' raw responses
         StructuredOutputProviderError       — provider error (rate limit, 5xx, timeout)
     """
     if provider not in ("anthropic", "openai"):
@@ -64,55 +86,75 @@ def call_structured(
             f"provider_kwargs contains reserved keys managed by the library: {sorted(bad)}"
         )
 
-    with llm_span(provider, llm_model, model_class.__name__) as record:
-        try:
-            if provider == "anthropic":
-                parsed, tokens_in, tokens_out = anthropic_provider.call_anthropic(
-                    model_class=model_class,
-                    prompt=prompt,
-                    system=system,
-                    llm_model=llm_model,
-                    max_tokens=max_tokens,
-                    timeout_seconds=timeout_seconds,
-                    provider_kwargs=pkwargs,
-                )
-            else:
-                parsed, tokens_in, tokens_out = openai_provider.call_openai(
-                    model_class=model_class,
-                    prompt=prompt,
-                    system=system,
-                    llm_model=llm_model,
-                    max_tokens=max_tokens,
-                    timeout_seconds=timeout_seconds,
-                    provider_kwargs=pkwargs,
-                )
-        except _ProviderParseFailure as e:
-            record["tokens_in"] = e.tokens_in
-            record["tokens_out"] = e.tokens_out
-            raise StructuredOutputValidationError(
-                f"{model_class.__name__} parse failure: {e.reason}",
-                provider=provider,
-                llm_model=llm_model,
-                schema_name=model_class.__name__,
-                raw_response=e.raw_response,
-                validation_errors=[{"loc": [], "msg": e.reason, "type": "provider_parse"}],
-                attempts=[{"raw_response": e.raw_response, "validation_errors": []}],
-            ) from e
+    schema_json = pydantic_to_json_schema(model_class)
+    provider_fn = (
+        anthropic_provider.call_anthropic
+        if provider == "anthropic"
+        else openai_provider.call_openai
+    )
 
-        record["tokens_in"] = tokens_in
-        record["tokens_out"] = tokens_out
-        try:
-            instance = model_class.model_validate(parsed)
-        except ValidationError as e:
-            errors = e.errors()
-            raise StructuredOutputValidationError(
-                f"{model_class.__name__} validation failed: {len(errors)} error(s)",
-                provider=provider,
-                llm_model=llm_model,
-                schema_name=model_class.__name__,
-                raw_response=parsed,
-                validation_errors=errors,
-                attempts=[{"raw_response": parsed, "validation_errors": errors}],
-            ) from e
-        record["parse_success"] = True
-        return instance
+    with llm_span(provider, llm_model, model_class.__name__) as record:
+        attempts_log: list[dict[str, Any]] = []
+        current_prompt = prompt
+
+        for attempt_idx in range(_MAX_RETRIES + 1):
+            try:
+                parsed, tokens_in, tokens_out = provider_fn(
+                    model_class=model_class,
+                    prompt=current_prompt,
+                    system=system,
+                    llm_model=llm_model,
+                    max_tokens=max_tokens,
+                    timeout_seconds=timeout_seconds,
+                    provider_kwargs=pkwargs,
+                )
+            except _ProviderParseFailure as e:
+                record["tokens_in"] += e.tokens_in
+                record["tokens_out"] += e.tokens_out
+                attempt_errors = [{"loc": [], "msg": e.reason, "type": "provider_parse"}]
+                attempts_log.append({
+                    "raw_response": e.raw_response,
+                    "validation_errors": attempt_errors,
+                })
+                if attempt_idx < _MAX_RETRIES:
+                    current_prompt = _build_retry_prompt(prompt, attempt_errors, schema_json)
+                    record["retry_count"] = attempt_idx + 1
+                    continue
+                raise StructuredOutputValidationError(
+                    f"{model_class.__name__} parse failure after {_MAX_RETRIES} retry: {e.reason}",
+                    provider=provider,
+                    llm_model=llm_model,
+                    schema_name=model_class.__name__,
+                    raw_response=e.raw_response,
+                    validation_errors=attempt_errors,
+                    attempts=attempts_log,
+                ) from e
+
+            record["tokens_in"] += tokens_in
+            record["tokens_out"] += tokens_out
+            try:
+                instance = model_class.model_validate(parsed)
+            except ValidationError as e:
+                errors = e.errors()
+                attempts_log.append({
+                    "raw_response": parsed,
+                    "validation_errors": errors,
+                })
+                if attempt_idx < _MAX_RETRIES:
+                    current_prompt = _build_retry_prompt(prompt, errors, schema_json)
+                    record["retry_count"] = attempt_idx + 1
+                    continue
+                raise StructuredOutputValidationError(
+                    f"{model_class.__name__} validation failed after {_MAX_RETRIES} retry: {len(errors)} error(s)",
+                    provider=provider,
+                    llm_model=llm_model,
+                    schema_name=model_class.__name__,
+                    raw_response=parsed,
+                    validation_errors=errors,
+                    attempts=attempts_log,
+                ) from e
+
+            record["parse_success"] = True
+            return instance
+
+        raise RuntimeError("call_structured exited retry loop without success or raise")

@@ -160,12 +160,25 @@ def _build_anthropic_msg(scenario_response: dict[str, Any]) -> _MockAnthropicMes
 
 @pytest.fixture
 def stub_anthropic(monkeypatch):
-    state: dict[str, Any] = {"response": None, "exception": None}
+    """Set state['responses'] to a list of scenario_response dicts (one per call).
+
+    For backward-compat with PR-A tests, also accepts state['response'] (single dict).
+    For exception-injection, set state['exception'] (raised on every call).
+    """
+    state: dict[str, Any] = {"responses": [], "response": None, "exception": None}
+    counter = {"i": 0}
 
     def fake_create(self, **kwargs):
         if state["exception"]:
             raise state["exception"]
-        return _build_anthropic_msg(state["response"])
+        responses = state["responses"] or ([state["response"]] if state["response"] else [])
+        i = counter["i"]
+        counter["i"] += 1
+        if i >= len(responses):
+            raise IndexError(
+                f"stub_anthropic: test made call #{i + 1} but only stubbed {len(responses)} responses"
+            )
+        return _build_anthropic_msg(responses[i])
 
     monkeypatch.setattr("anthropic.resources.messages.Messages.create", fake_create)
     ap.reset_client()
@@ -200,12 +213,27 @@ class _MockOAIResponse:
 
 @pytest.fixture
 def stub_openai(monkeypatch):
-    state: dict[str, Any] = {"content": None, "exception": None}
+    """Set state['contents'] to a list of response content strings (one per call).
+
+    For backward-compat with PR-A tests, also accepts state['content'] (single string).
+    For exception-injection, set state['exception'].
+    """
+    state: dict[str, Any] = {"contents": [], "content": None, "exception": None}
+    counter = {"i": 0}
 
     def fake_create(self, **kwargs):
         if state["exception"]:
             raise state["exception"]
-        return _MockOAIResponse(state["content"])
+        contents = state["contents"] or (
+            [state["content"]] if state["content"] is not None else []
+        )
+        i = counter["i"]
+        counter["i"] += 1
+        if i >= len(contents):
+            raise IndexError(
+                f"stub_openai: test made call #{i + 1} but only stubbed {len(contents)} responses"
+            )
+        return _MockOAIResponse(contents[i])
 
     monkeypatch.setattr("openai.resources.chat.completions.Completions.create", fake_create)
     op.reset_client()

@@ -45,16 +45,16 @@ def test_span_marks_unknown_cost_for_unpriced_model(otel_exporter, stub_anthropi
     assert attrs["llm.cost_usd"] == 0.0
 
 
-def test_span_records_error_on_validation_failure(
-    otel_exporter, stub_anthropic, schemas, gd
+def test_span_records_error_on_exhausted_retry(
+    otel_exporter, stub_anthropic, schemas
 ):
-    """Validation error → span has error.type and parse_success=False."""
-    # Force a validation failure: return a response missing required `rating`.
-    stub_anthropic["response"] = {
+    """Validation error after retry exhausted → span has error.type, parse_success=False, retry_count=1."""
+    bad = {
         "type": "tool_use",
         "name": "TraderRating",
         "input": {"ticker": "AAPL", "confidence": 0.7, "rationale": "stable"},
     }
+    stub_anthropic["responses"] = [bad, bad]  # both attempts fail with same shape
 
     import pytest
     from structured_llm_output import StructuredOutputValidationError
@@ -70,5 +70,6 @@ def test_span_records_error_on_validation_failure(
     span = otel_exporter.get_finished_spans()[0]
     attrs = dict(span.attributes)
     assert attrs["llm.structured.parse_success"] is False
+    assert attrs["llm.structured.retry_count"] == 1
     assert attrs["error.type"] == "StructuredOutputValidationError"
     assert "validation failed" in attrs["error.message"]
