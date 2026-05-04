@@ -16,15 +16,41 @@ from pydantic import BaseModel, Field  # noqa: E402
 
 from structured_llm_output import MarkdownRenderable  # noqa: E402
 from structured_llm_output.providers import anthropic as ap  # noqa: E402
+from structured_llm_output.providers import gemini as gp  # noqa: E402
 from structured_llm_output.providers import openai as op  # noqa: E402
 
 
-_GOLDEN_PATH = (
-    Path(__file__).parent.parent.parent.parent
-    / "specs"
-    / "structured-llm-output"
-    / "golden-data.json"
-)
+def _resolve_golden_path() -> Path:
+    """Find golden-data.json across known clone layouts.
+
+    Candidates (first existing wins):
+      A. Sibling to repo:        ../../specs/structured-llm-output/  (legacy)
+      B. Inside AITradingAPP:    ../AITradingAPP/specs/structured-llm-output/
+      C. Inside repo:            ../specs/structured-llm-output/      (future home)
+    Override via SLO_GOLDEN_DATA env var.
+    """
+    override = os.getenv("SLO_GOLDEN_DATA")
+    if override:
+        p = Path(override)
+        if p.exists():
+            return p
+    repo_root = Path(__file__).parent.parent
+    candidates = [
+        repo_root.parent / "specs" / "structured-llm-output" / "golden-data.json",
+        repo_root.parent / "AITradingAPP" / "specs" / "structured-llm-output" / "golden-data.json",
+        repo_root / "specs" / "structured-llm-output" / "golden-data.json",
+    ]
+    for c in candidates:
+        if c.exists():
+            return c
+    raise FileNotFoundError(
+        "golden-data.json not found in any known location. Tried:\n  "
+        + "\n  ".join(str(c) for c in candidates)
+        + "\nSet SLO_GOLDEN_DATA=/path/to/golden-data.json to override."
+    )
+
+
+_GOLDEN_PATH = _resolve_golden_path()
 
 
 @pytest.fixture(scope="session")
@@ -239,6 +265,55 @@ def stub_openai(monkeypatch):
     op.reset_client()
     yield state
     op.reset_client()
+
+
+# ---------- Gemini SDK stubs ----------
+
+
+class _MockGeminiUsage:
+    def __init__(self, prompt_token_count=80, candidates_token_count=40):
+        self.prompt_token_count = prompt_token_count
+        self.candidates_token_count = candidates_token_count
+
+
+class _MockGeminiResponse:
+    def __init__(self, text: str, prompt_tokens: int = 80, output_tokens: int = 40):
+        self.text = text
+        self.usage_metadata = _MockGeminiUsage(prompt_tokens, output_tokens)
+
+
+@pytest.fixture
+def stub_gemini(monkeypatch):
+    """Set state['contents'] to a list of response text strings (one per call).
+
+    For exception-injection, set state['exception'] (raised on every call).
+    The stub patches `google.genai.models.Models.generate_content` so the
+    `Client.models.generate_content(...)` path is intercepted.
+    """
+    state: dict[str, Any] = {"contents": [], "content": None, "exception": None}
+    counter = {"i": 0}
+
+    def fake_generate_content(self, **kwargs):
+        if state["exception"]:
+            raise state["exception"]
+        contents = state["contents"] or (
+            [state["content"]] if state["content"] is not None else []
+        )
+        i = counter["i"]
+        counter["i"] += 1
+        if i >= len(contents):
+            raise IndexError(
+                f"stub_gemini: test made call #{i + 1} but only stubbed {len(contents)} responses"
+            )
+        return _MockGeminiResponse(contents[i])
+
+    monkeypatch.setattr("google.genai.models.Models.generate_content", fake_generate_content)
+    gp.reset_client()
+    # Default to AI Studio mode for the stub (no GCP env required)
+    monkeypatch.setenv("GOOGLE_API_KEY", "test-fake-key-not-used")
+    monkeypatch.delenv("GOOGLE_GENAI_USE_VERTEXAI", raising=False)
+    yield state
+    gp.reset_client()
 
 
 # ---------- OTel test exporter ----------

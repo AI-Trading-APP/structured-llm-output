@@ -3,6 +3,27 @@
 All notable changes to `structured-llm-output` are documented here.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) · Versioning: [SemVer](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.0] — 2026-05-04
+
+### Added
+- **Gemini provider** via `google-genai` SDK. Backend auto-selected by env vars (matches the official google-genai convention):
+  - `GOOGLE_GENAI_USE_VERTEXAI=true` + `GOOGLE_CLOUD_PROJECT` + `GOOGLE_CLOUD_LOCATION` → **Vertex AI** (Application Default Credentials)
+  - else `GOOGLE_API_KEY` → **Google AI Studio** direct API
+- `provider="gemini"` accepted by `call_structured`. Uses `response_mime_type=application/json` + `response_schema` (Gemini's equivalent of Anthropic's `tool_use` forced binding).
+- Optional install extra: `pip install 'structured-llm-output[gemini]'` adds `google-genai>=1.0,<2.0`.
+- `_strip_unsupported_schema_fields` helper: drops Pydantic-emitted JSON Schema keys (`additionalProperties`, `$schema`, `default`, `title`) that Gemini's schema validator rejects.
+
+### Changed
+- `provider` Literal type widened from `Literal["anthropic", "openai"]` to `Literal["anthropic", "openai", "gemini"]`.
+- `tests/conftest.py`: `_resolve_golden_path()` now searches multiple candidate paths (legacy sibling layout, AITradingAPP-monorepo layout, in-repo) so the test suite runs from any clone position. Override via `SLO_GOLDEN_DATA` env var.
+
+### Tests
+- 10 new tests covering happy path, retry-on-malformed-JSON, parse-failure-then-retry-then-validation-error, JSON-array-root rejection, APIError → StructuredOutputProviderError mapping, non-Google exception passthrough, and `_strip_unsupported_schema_fields` recursion. **94% line coverage on the new provider.** All 40 tests pass.
+
+### Carry-forwards (non-blocking)
+- **MIN-G1** Live Gemini smoke tests gated behind `@pytest.mark.live_llm` not yet added — current 10 tests stub `google.genai.models.Models.generate_content`.
+- **MIN-G2** `timeout_seconds` argument is currently advisory for the Gemini path — google-genai's HTTP timeout is set per-call via `http_options`, not on the client. Consumers needing strict timeouts can set it via `provider_kwargs={"http_options": {"timeout": 30000}}` (milliseconds).
+
 ## [0.1.0] — 2026-04-30
 
 Initial release. Building Block 1 (BB1) of the
@@ -50,4 +71,5 @@ in `AI-Trading-APP/AITradingAPP`.
   distribution-pattern pivot, the directory was extracted via `git subtree split` and pushed here as
   the `main` branch. The two original commits remain in the git log.
 
+[0.2.0]: https://github.com/AI-Trading-APP/structured-llm-output/releases/tag/v0.2.0
 [0.1.0]: https://github.com/AI-Trading-APP/structured-llm-output/releases/tag/v0.1.0

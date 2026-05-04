@@ -8,6 +8,7 @@ from pydantic import ValidationError
 from ._internal import _ProviderParseFailure
 from .exceptions import StructuredOutputValidationError
 from .providers import anthropic as anthropic_provider
+from .providers import gemini as gemini_provider
 from .providers import openai as openai_provider
 from .renderable import MarkdownRenderable
 from .schema_utils import pydantic_to_json_schema
@@ -43,7 +44,7 @@ def call_structured(
     model_class: type[T],
     prompt: str,
     *,
-    provider: Literal["anthropic", "openai"],
+    provider: Literal["anthropic", "openai", "gemini"],
     llm_model: str,
     system: str | None = None,
     max_tokens: int = 4096,
@@ -65,9 +66,9 @@ def call_structured(
                                               `attempts` list contains both attempts' raw responses
         StructuredOutputProviderError       — provider error (rate limit, 5xx, timeout)
     """
-    if provider not in ("anthropic", "openai"):
+    if provider not in ("anthropic", "openai", "gemini"):
         raise ValueError(
-            f"provider must be one of: anthropic, openai (got {provider!r})"
+            f"provider must be one of: anthropic, openai, gemini (got {provider!r})"
         )
     if not (isinstance(model_class, type) and issubclass(model_class, MarkdownRenderable)):
         raise TypeError(
@@ -87,11 +88,11 @@ def call_structured(
         )
 
     schema_json = pydantic_to_json_schema(model_class)
-    provider_fn = (
-        anthropic_provider.call_anthropic
-        if provider == "anthropic"
-        else openai_provider.call_openai
-    )
+    provider_fn = {
+        "anthropic": anthropic_provider.call_anthropic,
+        "openai": openai_provider.call_openai,
+        "gemini": gemini_provider.call_gemini,
+    }[provider]
 
     with llm_span(provider, llm_model, model_class.__name__) as record:
         attempts_log: list[dict[str, Any]] = []
