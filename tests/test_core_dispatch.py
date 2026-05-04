@@ -5,13 +5,16 @@ from structured_llm_output import MarkdownRenderable, call_structured
 
 
 def test_gd_slo_012_unknown_provider(schemas):
-    """GD-SLO-012: provider must be anthropic or openai."""
+    """GD-SLO-012: provider must be one of the supported names.
+
+    v0.2 added gemini, so the rejected example here is a clearly fake provider.
+    """
     with pytest.raises(ValueError, match="provider must be one of"):
         call_structured(
             model_class=schemas["ScreenerFilter"],
             prompt="x",
-            provider="gemini",  # type: ignore[arg-type]
-            llm_model="gemini-3-pro",
+            provider="cohere",  # type: ignore[arg-type]
+            llm_model="command-r",
         )
 
 
