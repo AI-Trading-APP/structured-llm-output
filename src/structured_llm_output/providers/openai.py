@@ -8,6 +8,7 @@ import openai
 
 from .._internal import _ProviderParseFailure
 from ..exceptions import StructuredOutputProviderError
+from ..media import MediaInput
 from ..renderable import MarkdownRenderable
 from ..schema_utils import pydantic_to_json_schema
 
@@ -31,6 +32,27 @@ def reset_client() -> None:
         _client = None
 
 
+def _build_user_content(prompt: str, attachments: list[MediaInput] | None) -> Any:
+    """User content: text plus image_url parts. With no attachments, returns the
+    bare prompt string (unchanged wire shape). PDFs are unsupported here."""
+    if not attachments:
+        return prompt
+    parts: list[dict[str, Any]] = [{"type": "text", "text": prompt}]
+    for att in attachments:
+        if att.is_pdf:
+            raise ValueError(
+                "The openai provider does not support PDF attachments; "
+                "use the anthropic or gemini provider for PDFs."
+            )
+        parts.append(
+            {
+                "type": "image_url",
+                "image_url": {"url": f"data:{att.mime_type};base64,{att.b64()}"},
+            }
+        )
+    return parts
+
+
 def call_openai(
     *,
     model_class: type[MarkdownRenderable],
@@ -40,18 +62,20 @@ def call_openai(
     max_tokens: int,
     timeout_seconds: float,
     provider_kwargs: dict[str, Any],
+    attachments: list[MediaInput] | None = None,
 ) -> tuple[dict[str, Any], int, int]:
     """OpenAI Chat Completions with json_schema strict mode.
 
     Returns: (parsed_dict, tokens_in, tokens_out)
     Raises: _ProviderParseFailure if response content isn't valid JSON.
             StructuredOutputProviderError on SDK errors.
+            ValueError if a PDF attachment is supplied (unsupported on this path).
     """
     schema = pydantic_to_json_schema(model_class)
-    messages: list[dict[str, str]] = []
+    messages: list[dict[str, Any]] = []
     if system:
         messages.append({"role": "system", "content": system})
-    messages.append({"role": "user", "content": prompt})
+    messages.append({"role": "user", "content": _build_user_content(prompt, attachments)})
     client = _get_client(timeout_seconds)
     try:
         response = client.chat.completions.create(

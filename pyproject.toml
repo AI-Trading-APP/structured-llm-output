@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "structured-llm-output"
-version = "0.2.0"
+version = "0.3.0"
 description = "Pydantic-bound provider-native structured output for LLM calls (Anthropic, OpenAI, Gemini)"
 readme = "README.md"
 requires-python = ">=3.11"

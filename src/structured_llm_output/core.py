@@ -7,6 +7,7 @@ from pydantic import ValidationError
 
 from ._internal import _ProviderParseFailure
 from .exceptions import StructuredOutputValidationError
+from .media import MediaInput
 from .providers import anthropic as anthropic_provider
 from .providers import gemini as gemini_provider
 from .providers import openai as openai_provider
@@ -50,6 +51,7 @@ def call_structured(
     max_tokens: int = 4096,
     provider_kwargs: dict[str, Any] | None = None,
     timeout_seconds: float = 30.0,
+    attachments: list[MediaInput] | None = None,
 ) -> T:
     """Call an LLM and return a validated instance of `model_class`.
 
@@ -57,6 +59,10 @@ def call_structured(
     (REQ-SLO-004). Provider errors (rate limit, 5xx, timeout) are NOT retried —
     they bubble up as StructuredOutputProviderError so callers can apply their
     own backoff or breaker logic (see design §6.1).
+
+    `attachments` sends images/PDFs alongside the prompt for vision-capable
+    extraction (anthropic + gemini support PDF; openai images only). The schema
+    binding and corrective-retry loop apply identically to multimodal calls.
 
     Raises:
         ValueError                          — unknown provider, or reserved provider_kwargs key
@@ -108,6 +114,7 @@ def call_structured(
                     max_tokens=max_tokens,
                     timeout_seconds=timeout_seconds,
                     provider_kwargs=pkwargs,
+                    attachments=attachments,
                 )
             except _ProviderParseFailure as e:
                 record["tokens_in"] += e.tokens_in

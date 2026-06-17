@@ -7,6 +7,7 @@ import anthropic
 
 from .._internal import _ProviderParseFailure
 from ..exceptions import StructuredOutputProviderError
+from ..media import MediaInput
 from ..renderable import MarkdownRenderable
 from ..schema_utils import pydantic_to_json_schema
 
@@ -36,6 +37,32 @@ def reset_client() -> None:
         _client = None
 
 
+def _build_user_content(
+    prompt: str, attachments: list[MediaInput] | None
+) -> Any:
+    """User message content: image/document blocks first, then the text prompt.
+
+    With no attachments, returns the bare prompt string (identical wire shape to
+    the pre-multimodal path, so existing behavior is unchanged)."""
+    if not attachments:
+        return prompt
+    blocks: list[dict[str, Any]] = []
+    for att in attachments:
+        block_type = "document" if att.is_pdf else "image"
+        blocks.append(
+            {
+                "type": block_type,
+                "source": {
+                    "type": "base64",
+                    "media_type": att.mime_type,
+                    "data": att.b64(),
+                },
+            }
+        )
+    blocks.append({"type": "text", "text": prompt})
+    return blocks
+
+
 def call_anthropic(
     *,
     model_class: type[MarkdownRenderable],
@@ -45,6 +72,7 @@ def call_anthropic(
     max_tokens: int,
     timeout_seconds: float,
     provider_kwargs: dict[str, Any],
+    attachments: list[MediaInput] | None = None,
 ) -> tuple[dict[str, Any], int, int]:
     """Anthropic Messages API with forced tool_use binding.
 
@@ -58,12 +86,13 @@ def call_anthropic(
         "description": (model_class.__doc__ or "Return a structured response.").strip()[:1000],
         "input_schema": schema,
     }
+    user_content = _build_user_content(prompt, attachments)
     client = _get_client(timeout_seconds)
     try:
         response = client.messages.create(
             model=llm_model,
             system=system or "Use the provided tool to respond.",
-            messages=[{"role": "user", "content": prompt}],
+            messages=[{"role": "user", "content": user_content}],
             tools=[tool],
             tool_choice={"type": "tool", "name": model_class.__name__},
             max_tokens=max_tokens,

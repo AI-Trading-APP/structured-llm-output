@@ -22,6 +22,7 @@ from typing import Any
 
 from .._internal import _ProviderParseFailure
 from ..exceptions import StructuredOutputProviderError
+from ..media import MediaInput
 from ..renderable import MarkdownRenderable
 from ..schema_utils import pydantic_to_json_schema
 
@@ -100,6 +101,21 @@ def _strip_unsupported_schema_fields(schema: dict[str, Any]) -> dict[str, Any]:
     return cleaned
 
 
+def _build_contents(prompt: str, attachments: list[MediaInput] | None) -> Any:
+    """Gemini `contents`: inline image/PDF Parts followed by the text prompt.
+
+    With no attachments, returns the bare prompt string (unchanged wire shape).
+    `Part.from_bytes` handles both images and PDFs via mime_type."""
+    if not attachments:
+        return prompt
+    genai = _import_genai()
+    parts = [
+        genai.types.Part.from_bytes(data=bytes(att.data), mime_type=att.mime_type)
+        for att in attachments
+    ]
+    return [*parts, prompt]
+
+
 def call_gemini(
     *,
     model_class: type[MarkdownRenderable],
@@ -109,6 +125,7 @@ def call_gemini(
     max_tokens: int,
     timeout_seconds: float,
     provider_kwargs: dict[str, Any],
+    attachments: list[MediaInput] | None = None,
 ) -> tuple[dict[str, Any], int, int]:
     """Gemini structured output via response_schema + JSON mime.
 
@@ -123,16 +140,21 @@ def call_gemini(
         "response_mime_type": "application/json",
         "response_schema": schema,
         "max_output_tokens": max_tokens,
+        # Enforce the per-call timeout on Gemini. google-genai's HTTP timeout is
+        # request-level via http_options (milliseconds), NOT the client timeout —
+        # without this the `timeout_seconds` contract is silently ignored.
+        "http_options": {"timeout": int(timeout_seconds * 1000)},
     }
     if system:
         config["system_instruction"] = system
     # Caller-supplied overrides take precedence (e.g. temperature, top_p)
     config.update(provider_kwargs)
 
+    contents = _build_contents(prompt, attachments)
     try:
         response = client.models.generate_content(
             model=llm_model,
-            contents=prompt,
+            contents=contents,
             config=config,
         )
     except Exception as e:

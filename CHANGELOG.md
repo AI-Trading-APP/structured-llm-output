@@ -3,6 +3,17 @@
 All notable changes to `structured-llm-output` are documented here.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) · Versioning: [SemVer](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.0] — 2026-06-17
+
+### Added
+- **Multimodal attachments.** `call_structured(..., attachments=[MediaInput(...)])` sends images / PDFs alongside the text prompt for vision-based extraction, while keeping the Pydantic-schema binding and corrective-retry loop unchanged.
+- New public `MediaInput(mime_type, data: bytes)` value type (`structured_llm_output.media`). Accepts `image/png`, `image/jpeg`, `image/webp`, `image/gif`, and `application/pdf`; validates on construction.
+- Per-provider wire shapes: Anthropic image/`document` blocks (PDF supported), Gemini inline `Part.from_bytes` (PDF supported), OpenAI `image_url` parts (images only — PDF raises `ValueError`).
+- Primary consumer: the EPI portfolio-import vision extractor (broker screenshot/PDF → holdings).
+
+### Changed
+- All three provider functions accept an optional `attachments` kwarg. The no-attachment path sends the bare prompt string exactly as before (byte-identical wire shape), so existing callers are unaffected.
+
 ## [0.2.0] — 2026-05-04
 
 ### Added
