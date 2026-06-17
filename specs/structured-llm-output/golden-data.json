@@ -1,0 +1,448 @@
+{
+  "metadata": {
+    "feature": "structured-llm-output",
+    "building_block": "BB1",
+    "version": "1.2",
+    "date": "2026-04-30",
+    "scenarios": 13,
+    "notes": "Each scenario is a recorded provider response. Tests stub provider SDKs to return `provider_response` and assert that call_structured returns `expected_parsed` (or raises `expected_error`). No live LLM calls.",
+    "changelog": [
+      { "version": "1.0", "date": "2026-04-30", "change": "Initial 12 scenarios (BB1 Phase 1)" },
+      { "version": "1.1", "date": "2026-04-30", "change": "Added GD-SLO-013 (no tool_use block recovery) per CPO M1 follow-up + R-BB1-003 mitigation; landed in BB1 Phase 3 PR-B" },
+      { "version": "1.2", "date": "2026-04-30", "change": "Corrected GD-SLO-009 to match the real ScreenerService parse_with_claude contract (nested {filters, explanation} shape, 11 filter fields). Original Phase 1 spec assumed a simpler flat shape; landed in BB1 Phase 3 PR-C." }
+    ]
+  },
+  "schemas": {
+    "ScreenerFilter": {
+      "fields": {
+        "market_cap_min": "int | null",
+        "market_cap_max": "int | null",
+        "sector": "list[str] | null",
+        "pe_max": "float | null",
+        "pe_min": "float | null",
+        "exchange": "list[str] | null"
+      },
+      "required": []
+    },
+    "TraderRating": {
+      "fields": {
+        "ticker": "str",
+        "rating": "Buy | Overweight | Hold | Underweight | Sell",
+        "confidence": "float (0..1)",
+        "rationale": "str"
+      },
+      "required": ["ticker", "rating", "confidence", "rationale"]
+    },
+    "ResearchPlan": {
+      "fields": {
+        "ticker": "str",
+        "rating": "Buy | Overweight | Hold | Underweight | Sell",
+        "thesis": "str",
+        "risks": "list[str]",
+        "actions": {
+          "entry_price": "float | null",
+          "stop_loss": "float | null",
+          "position_pct": "float (0..1)"
+        }
+      },
+      "required": ["ticker", "rating", "thesis", "risks", "actions"]
+    }
+  },
+  "scenarios": [
+    {
+      "id": "GD-SLO-001",
+      "name": "Anthropic + simple schema, valid response",
+      "requirement": "REQ-SLO-001",
+      "input": {
+        "provider": "anthropic",
+        "llm_model": "claude-haiku-4-5-20251001",
+        "schema": "ScreenerFilter",
+        "prompt": "undervalued mid-cap tech stocks under $20B market cap with PE under 15"
+      },
+      "provider_response": {
+        "type": "tool_use",
+        "id": "toolu_01ABC",
+        "name": "ScreenerFilter",
+        "input": {
+          "market_cap_max": 20000000000,
+          "sector": ["Technology"],
+          "pe_max": 15.0
+        }
+      },
+      "expected_parsed": {
+        "market_cap_min": null,
+        "market_cap_max": 20000000000,
+        "sector": ["Technology"],
+        "pe_max": 15.0,
+        "pe_min": null,
+        "exchange": null
+      },
+      "expected_retry_count": 0
+    },
+    {
+      "id": "GD-SLO-002",
+      "name": "OpenAI + simple schema, valid response",
+      "requirement": "REQ-SLO-002",
+      "input": {
+        "provider": "openai",
+        "llm_model": "gpt-4o-2024-11-20",
+        "schema": "ScreenerFilter",
+        "prompt": "blue-chip energy stocks on NYSE"
+      },
+      "provider_response": {
+        "content": "{\"sector\": [\"Energy\"], \"exchange\": [\"NYSE\"], \"market_cap_min\": 50000000000}"
+      },
+      "expected_parsed": {
+        "market_cap_min": 50000000000,
+        "market_cap_max": null,
+        "sector": ["Energy"],
+        "pe_max": null,
+        "pe_min": null,
+        "exchange": ["NYSE"]
+      },
+      "expected_retry_count": 0
+    },
+    {
+      "id": "GD-SLO-003",
+      "name": "Anthropic + complex nested schema (ResearchPlan), valid",
+      "requirement": "REQ-SLO-001, REQ-SLO-003",
+      "input": {
+        "provider": "anthropic",
+        "llm_model": "claude-sonnet-4-6",
+        "schema": "ResearchPlan",
+        "prompt": "Synthesize bull/bear debate for NVDA into a research plan"
+      },
+      "provider_response": {
+        "type": "tool_use",
+        "id": "toolu_02DEF",
+        "name": "ResearchPlan",
+        "input": {
+          "ticker": "NVDA",
+          "rating": "Overweight",
+          "thesis": "AI compute demand remains structural; Blackwell rollout accretive to gross margin.",
+          "risks": [
+            "Hyperscaler capex deceleration in late 2026",
+            "China revenue impairment from export controls",
+            "Competitive pressure from custom silicon (TPU, Trainium)"
+          ],
+          "actions": {
+            "entry_price": 142.5,
+            "stop_loss": 128.0,
+            "position_pct": 0.06
+          }
+        }
+      },
+      "expected_parsed": {
+        "ticker": "NVDA",
+        "rating": "Overweight",
+        "thesis": "AI compute demand remains structural; Blackwell rollout accretive to gross margin.",
+        "risks": [
+          "Hyperscaler capex deceleration in late 2026",
+          "China revenue impairment from export controls",
+          "Competitive pressure from custom silicon (TPU, Trainium)"
+        ],
+        "actions": {
+          "entry_price": 142.5,
+          "stop_loss": 128.0,
+          "position_pct": 0.06
+        }
+      },
+      "expected_retry_count": 0
+    },
+    {
+      "id": "GD-SLO-004",
+      "name": "OpenAI returns malformed JSON → corrective retry succeeds",
+      "requirement": "REQ-SLO-004",
+      "input": {
+        "provider": "openai",
+        "llm_model": "gpt-4o-2024-11-20",
+        "schema": "ScreenerFilter",
+        "prompt": "growth stocks"
+      },
+      "provider_responses_in_order": [
+        {
+          "content": "Here you go: {\"sector\": [\"Technology\"]"
+        },
+        {
+          "content": "{\"sector\": [\"Technology\"], \"market_cap_min\": 10000000000}"
+        }
+      ],
+      "expected_parsed": {
+        "market_cap_min": 10000000000,
+        "market_cap_max": null,
+        "sector": ["Technology"],
+        "pe_max": null,
+        "pe_min": null,
+        "exchange": null
+      },
+      "expected_retry_count": 1
+    },
+    {
+      "id": "GD-SLO-005",
+      "name": "Anthropic missing required field → validation error after retry",
+      "requirement": "REQ-SLO-003, REQ-SLO-004",
+      "input": {
+        "provider": "anthropic",
+        "llm_model": "claude-sonnet-4-6",
+        "schema": "TraderRating",
+        "prompt": "Rate AAPL"
+      },
+      "provider_responses_in_order": [
+        {
+          "type": "tool_use",
+          "id": "toolu_03GHI",
+          "name": "TraderRating",
+          "input": {
+            "ticker": "AAPL",
+            "confidence": 0.7,
+            "rationale": "Stable cash flows."
+          }
+        },
+        {
+          "type": "tool_use",
+          "id": "toolu_04JKL",
+          "name": "TraderRating",
+          "input": {
+            "ticker": "AAPL",
+            "confidence": 0.7,
+            "rationale": "Stable cash flows."
+          }
+        }
+      ],
+      "expected_error": {
+        "type": "StructuredOutputValidationError",
+        "missing_fields": ["rating"],
+        "retry_count": 1
+      }
+    },
+    {
+      "id": "GD-SLO-006",
+      "name": "Extra unknown field is ignored, validation succeeds",
+      "requirement": "REQ-SLO-003",
+      "input": {
+        "provider": "anthropic",
+        "llm_model": "claude-haiku-4-5-20251001",
+        "schema": "ScreenerFilter",
+        "prompt": "biotech with high R&D"
+      },
+      "provider_response": {
+        "type": "tool_use",
+        "id": "toolu_05MNO",
+        "name": "ScreenerFilter",
+        "input": {
+          "sector": ["Healthcare"],
+          "rd_intensity_min": 0.15,
+          "pe_max": 30.0
+        }
+      },
+      "expected_parsed": {
+        "market_cap_min": null,
+        "market_cap_max": null,
+        "sector": ["Healthcare"],
+        "pe_max": 30.0,
+        "pe_min": null,
+        "exchange": null
+      },
+      "expected_retry_count": 0
+    },
+    {
+      "id": "GD-SLO-007",
+      "name": "Enum value out of allowed set → validation error after retry",
+      "requirement": "REQ-SLO-003",
+      "input": {
+        "provider": "openai",
+        "llm_model": "gpt-4o-2024-11-20",
+        "schema": "TraderRating",
+        "prompt": "Rate TSLA"
+      },
+      "provider_responses_in_order": [
+        {
+          "content": "{\"ticker\":\"TSLA\",\"rating\":\"StrongBuy\",\"confidence\":0.85,\"rationale\":\"Robotaxi optionality.\"}"
+        },
+        {
+          "content": "{\"ticker\":\"TSLA\",\"rating\":\"StrongBuy\",\"confidence\":0.85,\"rationale\":\"Robotaxi optionality.\"}"
+        }
+      ],
+      "expected_error": {
+        "type": "StructuredOutputValidationError",
+        "invalid_fields": ["rating"],
+        "retry_count": 1
+      }
+    },
+    {
+      "id": "GD-SLO-008",
+      "name": "Confidence out of range (>1.0) → validation error",
+      "requirement": "REQ-SLO-003",
+      "input": {
+        "provider": "anthropic",
+        "llm_model": "claude-haiku-4-5-20251001",
+        "schema": "TraderRating",
+        "prompt": "Rate MSFT"
+      },
+      "provider_responses_in_order": [
+        {
+          "type": "tool_use",
+          "id": "toolu_06PQR",
+          "name": "TraderRating",
+          "input": {
+            "ticker": "MSFT",
+            "rating": "Buy",
+            "confidence": 1.4,
+            "rationale": "Cloud growth."
+          }
+        },
+        {
+          "type": "tool_use",
+          "id": "toolu_07STU",
+          "name": "TraderRating",
+          "input": {
+            "ticker": "MSFT",
+            "rating": "Buy",
+            "confidence": 0.82,
+            "rationale": "Cloud growth + Azure AI revenue."
+          }
+        }
+      ],
+      "expected_parsed": {
+        "ticker": "MSFT",
+        "rating": "Buy",
+        "confidence": 0.82,
+        "rationale": "Cloud growth + Azure AI revenue."
+      },
+      "expected_retry_count": 1
+    },
+    {
+      "id": "GD-SLO-009",
+      "name": "ScreenerService parity — natural language to nested {filters, explanation} dict (REAL contract)",
+      "requirement": "REQ-SLO-008",
+      "corrected_in": "BB1 Phase 3 PR-C (golden-data v1.2) — original Phase 1 scenario assumed a flat filter dict; the actual ScreenerService.parse_with_claude returns nested shape per ScreenerService/screener_ai.py:128",
+      "input": {
+        "adapter": "parse_with_claude",
+        "schema": "ScreenerResponse",
+        "prompt": "small cap value stocks under $5B with PE under 12 in financial sector"
+      },
+      "provider_response": {
+        "type": "tool_use",
+        "id": "toolu_08VWX",
+        "name": "ScreenerResponse",
+        "input": {
+          "filters": {
+            "minMarketCap": "300000000",
+            "maxPE": 12.0,
+            "sector": "Financial Services"
+          },
+          "explanation": [
+            "Small cap = minMarketCap of $300M",
+            "PE under 12 → maxPE: 12",
+            "Financial sector → sector: Financial Services"
+          ]
+        }
+      },
+      "expected_legacy_dict": {
+        "filters": {
+          "minMarketCap": "300000000",
+          "maxPE": 12.0,
+          "sector": "Financial Services"
+        },
+        "explanation": [
+          "Small cap = minMarketCap of $300M",
+          "PE under 12 → maxPE: 12",
+          "Financial sector → sector: Financial Services"
+        ]
+      },
+      "notes": "ScreenerResponse is a MarkdownRenderable wrapping nested ScreenerFilters + explanation list. minMarketCap and minVolume are returned as strings (existing contract); ScreenerService preserves its numeric→string post-processing for these two fields."
+    },
+    {
+      "id": "GD-SLO-010",
+      "name": "Markdown round-trip — ScreenerFilter to markdown is stable and human-readable",
+      "requirement": "REQ-SLO-005",
+      "input": {
+        "schema": "ScreenerFilter",
+        "instance": {
+          "market_cap_max": 20000000000,
+          "sector": ["Technology"],
+          "pe_max": 15.0
+        }
+      },
+      "expected_markdown": "**Filter**\n- Sector: Technology\n- Market cap: ≤ $20.0B\n- P/E: ≤ 15.0",
+      "notes": "Each schema decides its own markdown shape — library only enforces the to_markdown contract exists. Test asserts exact string equality to lock the format."
+    },
+    {
+      "id": "GD-SLO-011",
+      "name": "Anthropic API error (rate limit) propagates with provider context",
+      "requirement": "REQ-SLO-001",
+      "input": {
+        "provider": "anthropic",
+        "llm_model": "claude-haiku-4-5-20251001",
+        "schema": "ScreenerFilter",
+        "prompt": "any query"
+      },
+      "provider_error": {
+        "type": "RateLimitError",
+        "status_code": 429,
+        "message": "rate_limit_exceeded"
+      },
+      "expected_error": {
+        "type": "RateLimitError",
+        "context": {
+          "provider": "anthropic",
+          "llm_model": "claude-haiku-4-5-20251001",
+          "schema_name": "ScreenerFilter"
+        }
+      },
+      "notes": "Library does NOT swallow provider errors — caller is responsible for backoff and fallback. Library only attaches context for observability."
+    },
+    {
+      "id": "GD-SLO-012",
+      "name": "Unknown provider raises ValueError",
+      "requirement": "REQ-SLO-006",
+      "input": {
+        "provider": "gemini",
+        "llm_model": "gemini-3-pro",
+        "schema": "ScreenerFilter",
+        "prompt": "any"
+      },
+      "expected_error": {
+        "type": "ValueError",
+        "message_contains": "provider must be one of"
+      }
+    },
+    {
+      "id": "GD-SLO-013",
+      "name": "Anthropic returns text block instead of tool_use → corrective retry succeeds",
+      "requirement": "REQ-SLO-001, REQ-SLO-004",
+      "added_in": "BB1 Phase 3 PR-B (per CPO follow-up M1; R-BB1-003 mitigation)",
+      "input": {
+        "provider": "anthropic",
+        "llm_model": "claude-haiku-4-5-20251001",
+        "schema": "TraderRating",
+        "prompt": "Rate NVDA"
+      },
+      "provider_responses_in_order": [
+        {
+          "type": "text",
+          "text": "I think NVDA is a strong buy because of AI compute demand and the Blackwell rollout. The stock has had a great run."
+        },
+        {
+          "type": "tool_use",
+          "id": "toolu_09YZA",
+          "name": "TraderRating",
+          "input": {
+            "ticker": "NVDA",
+            "rating": "Buy",
+            "confidence": 0.78,
+            "rationale": "Structural AI compute demand; Blackwell margin tailwind."
+          }
+        }
+      ],
+      "expected_parsed": {
+        "ticker": "NVDA",
+        "rating": "Buy",
+        "confidence": 0.78,
+        "rationale": "Structural AI compute demand; Blackwell margin tailwind."
+      },
+      "expected_retry_count": 1,
+      "notes": "Anthropic occasionally returns a text block under load even when tool_choice forces a specific tool. Library treats this as a parse failure recoverable via single corrective retry."
+    }
+  ]
+}
